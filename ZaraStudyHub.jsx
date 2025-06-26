@@ -38,29 +38,36 @@ export default function ZaraStudyHub() {
   const [loginError, setLoginError] = useState("");
   const [signedUp, setSignedUp] = useState(() => localStorage.getItem(SIGNEDUP_KEY) === "true");
   const [passwordOk, setPasswordOk] = useState(() => localStorage.getItem(PASSWORD_KEY) === "true");
+  const [debug, setDebug] = useState("");
+  const [showDebug, setShowDebug] = useState(true);
   const modalRef = useRef();
 
   // Auth state
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (u) => {
-      if (u) {
-        setUser(u);
-        localStorage.setItem(SIGNEDUP_KEY, "true");
-        setSignedUp(true);
-        // Save user to Firestore if not already present
-        const userRef = doc(db, "users", u.uid);
-        const userSnap = await getDoc(userRef);
-        if (!userSnap.exists()) {
-          await setDoc(userRef, {
-            uid: u.uid,
-            name: u.displayName,
-            email: u.email,
-            photoURL: u.photoURL,
-            firstAccess: new Date().toISOString()
-          });
+      try {
+        if (u) {
+          setUser(u);
+          localStorage.setItem(SIGNEDUP_KEY, "true");
+          setSignedUp(true);
+          // Save user to Firestore if not already present
+          const userRef = doc(db, "users", u.uid);
+          const userSnap = await getDoc(userRef);
+          if (!userSnap.exists()) {
+            await setDoc(userRef, {
+              uid: u.uid,
+              name: u.displayName,
+              email: u.email,
+              photoURL: u.photoURL,
+              firstAccess: new Date().toISOString()
+            });
+          }
+        } else {
+          setUser(null);
         }
-      } else {
-        setUser(null);
+      } catch (err) {
+        setDebug("Auth state error: " + (err?.message || err));
+        setShowDebug(true);
       }
     });
     return unsub;
@@ -133,8 +140,11 @@ export default function ZaraStudyHub() {
     try {
       await signInWithPopup(auth, provider);
       setLoginError("");
+      setDebug("");
     } catch (err) {
       setLoginError("Google sign-in failed.");
+      setDebug("Google sign-in error: " + (err?.message || err));
+      setShowDebug(true);
     }
   };
 
@@ -145,20 +155,44 @@ export default function ZaraStudyHub() {
       setPasswordOk(true);
       localStorage.setItem(PASSWORD_KEY, "true");
       setLoginError("");
+      setDebug("");
     } else {
       setLoginError("Incorrect password.");
+      setDebug("Password error: Incorrect password entered");
+      setShowDebug(true);
     }
   };
 
   // Logout (clears localStorage flags)
   const handleLogout = async () => {
-    await signOut(auth);
-    setUser(null);
-    setSignedUp(false);
-    setPasswordOk(false);
-    localStorage.removeItem(SIGNEDUP_KEY);
-    localStorage.removeItem(PASSWORD_KEY);
+    try {
+      await signOut(auth);
+      setUser(null);
+      setSignedUp(false);
+      setPasswordOk(false);
+      localStorage.removeItem(SIGNEDUP_KEY);
+      localStorage.removeItem(PASSWORD_KEY);
+      setDebug("");
+    } catch (err) {
+      setDebug("Logout error: " + (err?.message || err));
+      setShowDebug(true);
+    }
   };
+
+  // Debug panel
+  const DebugPanel = () =>
+    showDebug && debug ? (
+      <div className="fixed bottom-4 right-4 bg-white border border-red-300 shadow-lg rounded-lg p-4 z-50 max-w-xs text-xs text-red-700 flex flex-col gap-2">
+        <div className="font-bold text-red-600">Debug Info</div>
+        <div className="break-words whitespace-pre-wrap">{debug}</div>
+        <button
+          className="self-end text-xs text-blue-600 hover:underline mt-1"
+          onClick={() => setShowDebug(false)}
+        >
+          Dismiss
+        </button>
+      </div>
+    ) : null;
 
   // Auth flow logic
   if (!signedUp) {
@@ -176,6 +210,7 @@ export default function ZaraStudyHub() {
           </button>
           {loginError && <div className="text-red-500 text-sm mt-2">{loginError}</div>}
         </div>
+        <DebugPanel />
       </div>
     );
   }
@@ -201,6 +236,7 @@ export default function ZaraStudyHub() {
           </form>
           {loginError && <div className="text-red-500 text-sm mt-2">{loginError}</div>}
         </div>
+        <DebugPanel />
       </div>
     );
   }
@@ -297,6 +333,7 @@ export default function ZaraStudyHub() {
           </div>
         </div>
       )}
+      <DebugPanel />
     </div>
   );
 } 
