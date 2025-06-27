@@ -10,7 +10,9 @@ import {
   query,
   orderBy,
   getDoc,
-  setDoc
+  setDoc,
+  arrayUnion,
+  arrayRemove
 } from "firebase/firestore";
 import { signInWithPopup, onAuthStateChanged, signOut } from "firebase/auth";
 
@@ -23,6 +25,42 @@ const ACCESS_PASSWORD = "valedictorian";
 const SIGNEDUP_KEY = "zshub_signedup";
 const PASSWORD_KEY = "zshub_pw";
 
+// Subject color mapping
+const subjectColors = {
+  math: 'bg-green-200 text-green-900',
+  ag: 'bg-lime-200 text-lime-900',
+  values: 'bg-yellow-200 text-yellow-900',
+  science: 'bg-blue-200 text-blue-900',
+  r2: 'bg-pink-200 text-pink-900',
+  fil: 'bg-orange-200 text-orange-900',
+  er: 'bg-amber-200 text-amber-900',
+  eng: 'bg-indigo-200 text-indigo-900',
+  'mapeh/music': 'bg-purple-200 text-purple-900',
+  'mapeh/arts': 'bg-fuchsia-200 text-fuchsia-900',
+  'mapeh/pe': 'bg-cyan-200 text-cyan-900',
+  'mapeh/health': 'bg-teal-200 text-teal-900',
+  ap: 'bg-red-200 text-red-900',
+};
+
+// Date formatting and days left
+function formatDate(dateStr) {
+  if (!dateStr) return '';
+  const date = new Date(dateStr);
+  return date.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+}
+function daysLeft(dateStr) {
+  if (!dateStr) return '';
+  const today = new Date();
+  today.setHours(0,0,0,0);
+  const due = new Date(dateStr);
+  due.setHours(0,0,0,0);
+  const diff = Math.ceil((due - today) / (1000 * 60 * 60 * 24));
+  if (diff > 1) return `${diff} days left`;
+  if (diff === 1) return '1 day left';
+  if (diff === 0) return 'Due today';
+  return 'Overdue';
+}
+
 export default function ZaraStudyHub() {
   const [assignments, setAssignments] = useState([]);
   const [form, setForm] = useState({
@@ -30,6 +68,7 @@ export default function ZaraStudyHub() {
     deadline: "",
     description: "",
     subject: subjects[0],
+    starred: false,
   });
   const [editId, setEditId] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
@@ -41,6 +80,7 @@ export default function ZaraStudyHub() {
   const [debug, setDebug] = useState("");
   const [showDebug, setShowDebug] = useState(true);
   const modalRef = useRef();
+  const [menuOpenIdx, setMenuOpenIdx] = useState(null);
 
   // Auth state
   useEffect(() => {
@@ -79,7 +119,22 @@ export default function ZaraStudyHub() {
     const q = query(collection(db, "assignments"), orderBy("deadline", "asc"));
     const unsub = onSnapshot(q, (snapshot) => {
       setAssignments(
-        snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+        snapshot.docs.map(doc => {
+          const data = doc.data();
+          // Check if current user has completed this assignment
+          const completedByUser = data.completedBy && data.completedBy.includes(user.uid);
+          return { 
+            id: doc.id, 
+            ...data, 
+            completed: completedByUser 
+          };
+        })
+          // Sort starred items first, then by deadline
+          .sort((a, b) => {
+            if (a.starred && !b.starred) return -1;
+            if (!a.starred && b.starred) return 1;
+            return 0;
+          })
       );
     });
     return unsub;
@@ -88,7 +143,7 @@ export default function ZaraStudyHub() {
   const openModal = () => setModalOpen(true);
   const closeModal = () => {
     setModalOpen(false);
-    setForm({ title: "", deadline: "", description: "", subject: subjects[0] });
+    setForm({ title: "", deadline: "", description: "", subject: subjects[0], starred: false });
     setEditId(null);
   };
 
@@ -104,13 +159,38 @@ export default function ZaraStudyHub() {
     return () => document.removeEventListener("mousedown", handleClick);
   }, [modalOpen]);
 
+  // Close menu on outside click
+  useEffect(() => {
+    if (menuOpenIdx === null) return;
+    function handleMenuClick(e) {
+      if (!e.target.closest('.zshub-menu')) {
+        setMenuOpenIdx(null);
+      }
+    }
+    document.addEventListener('mousedown', handleMenuClick);
+    return () => document.removeEventListener('mousedown', handleMenuClick);
+  }, [menuOpenIdx]);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!form.title.trim()) return;
+    
+    // Prepare the assignment data (without completedBy field for new assignments)
+    const assignmentData = {
+      title: form.title,
+      deadline: form.deadline,
+      description: form.description,
+      subject: form.subject,
+      starred: form.starred || false,
+    };
+    
     if (editId === null) {
-      await addDoc(collection(db, "assignments"), form);
+      // Add a new assignment with empty completedBy array
+      assignmentData.completedBy = [];
+      await addDoc(collection(db, "assignments"), assignmentData);
     } else {
-      await updateDoc(doc(db, "assignments", editId), form);
+      // When editing, don't modify the completedBy field
+      await updateDoc(doc(db, "assignments", editId), assignmentData);
     }
     closeModal();
   };
@@ -122,6 +202,7 @@ export default function ZaraStudyHub() {
       deadline: a.deadline,
       description: a.description,
       subject: a.subject,
+      starred: a.starred || false,
     });
     setEditId(a.id);
     setModalOpen(true);
@@ -132,6 +213,31 @@ export default function ZaraStudyHub() {
     await deleteDoc(doc(db, "assignments", a.id));
     if (editId === a.id) {
       closeModal();
+    }
+  };
+
+  const handleToggleStar = async (idx) => {
+    const a = assignments[idx];
+    await updateDoc(doc(db, "assignments", a.id), {
+      starred: !a.starred
+    });
+  };
+
+  // Handle toggle completion
+  const handleToggleCompleted = async (idx) => {
+    const a = assignments[idx];
+    if (!user) return;
+    
+    if (a.completed) {
+      // Remove user from completedBy array
+      await updateDoc(doc(db, "assignments", a.id), {
+        completedBy: arrayRemove(user.uid)
+      });
+    } else {
+      // Add user to completedBy array
+      await updateDoc(doc(db, "assignments", a.id), {
+        completedBy: arrayUnion(user.uid)
+      });
     }
   };
 
@@ -244,33 +350,126 @@ export default function ZaraStudyHub() {
   return (
     <div className="min-h-screen bg-blue-50 font-sans flex flex-col">
       {/* Header Bar */}
-      <header className="bg-gradient-to-r from-blue-600 to-blue-400 shadow-md py-7 px-4 flex justify-center items-center">
-        <h1 className="text-white text-3xl sm:text-4xl font-extrabold tracking-tight drop-shadow-lg">Zara Study Hub</h1>
-        <button onClick={handleLogout} className="absolute right-6 top-6 bg-white text-blue-600 border border-blue-300 rounded-lg px-4 py-1 font-semibold shadow hover:bg-blue-50 transition text-sm">Logout</button>
+      <header className="bg-gradient-to-r from-blue-600 to-blue-400 shadow-md py-5 px-2 sm:py-7 sm:px-4 flex justify-center items-center relative">
+        <h1 className="text-white text-2xl sm:text-3xl md:text-4xl font-extrabold tracking-tight drop-shadow-lg text-center w-full">Zara Study Hub</h1>
+        <button onClick={handleLogout} className="absolute right-2 top-2 sm:right-6 sm:top-6 bg-white text-blue-600 border border-blue-300 rounded-lg px-3 py-1 font-semibold shadow hover:bg-blue-50 transition text-xs sm:text-sm">Logout</button>
       </header>
       {/* Add Assignment Button */}
       <button
         onClick={openModal}
-        className="fixed bottom-8 right-8 bg-blue-600 hover:bg-blue-700 text-white rounded-full shadow-lg px-6 py-3 text-lg font-bold z-20 focus:outline-none focus:ring-4 focus:ring-blue-300"
+        className="fixed bottom-4 right-4 sm:bottom-8 sm:right-8 bg-blue-600 hover:bg-blue-700 text-white rounded-full shadow-lg px-5 py-3 sm:px-6 sm:py-3 text-base sm:text-lg font-bold z-20 focus:outline-none focus:ring-4 focus:ring-blue-300"
       >
         + Add Assignment
       </button>
       {/* Main Card: Assignment List Only */}
-      <main className="flex-1 flex flex-col items-center justify-start mt-8 sm:mt-12">
-        <div className="w-full max-w-xl bg-white rounded-2xl shadow-2xl p-6 sm:p-10 z-10">
+      <main className="flex-1 flex flex-col items-center justify-start mt-4 sm:mt-8 md:mt-12 px-2 sm:px-0">
+        <div className="w-full max-w-md sm:max-w-xl bg-white rounded-2xl shadow-2xl p-3 sm:p-6 md:p-10 z-10">
           <ul className="list-none p-0">
             {assignments.length === 0 && <li className="text-gray-400 text-center">No assignments yet.</li>}
             {assignments.map((a, i) => (
-              <li key={a.id} className="bg-blue-100 mb-4 p-4 rounded-xl shadow flex flex-col gap-1">
-                <div className="font-semibold text-lg text-blue-700">{a.title}</div>
-                <div className="text-gray-700 text-sm my-1 whitespace-pre-line">{a.description}</div>
-                <div className="flex justify-between text-xs mt-1">
-                  <span><b>Subject:</b> {a.subject}</span>
-                  {a.deadline && <span><b>Deadline:</b> {a.deadline}</span>}
+              <li key={a.id} className={`${a.starred ? 'bg-yellow-50 border-l-4 border-yellow-400' : a.completed ? 'bg-green-50 border-l-4 border-green-400' : 'bg-blue-100'} mb-3 sm:mb-4 p-3 sm:p-4 rounded-xl shadow flex flex-col gap-1 relative`}>
+                <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-semibold text-base sm:text-lg text-blue-700 truncate flex items-center gap-1">
+                      {/* Star button */}
+                      <button
+                        onClick={() => handleToggleStar(i)}
+                        className="text-yellow-500 hover:text-yellow-600 focus:outline-none"
+                        aria-label={a.starred ? "Unstar assignment" : "Star assignment"}
+                      >
+                        {a.starred ? (
+                          <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                            <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118l-2.8-2.034c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+                          </svg>
+                        ) : (
+                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+                          </svg>
+                        )}
+                      </button>
+                      
+                      {/* Completed checkbox */}
+                      <button
+                        onClick={() => handleToggleCompleted(i)}
+                        className="mr-1 focus:outline-none"
+                        aria-label={a.completed ? "Mark as not completed" : "Mark as completed"}
+                      >
+                        {a.completed ? (
+                          <svg className="w-5 h-5 text-green-600" viewBox="0 0 20 20">
+                            <rect width="16" height="16" x="2" y="2" rx="2" fill="currentColor" />
+                            <path d="M6 10l3 3 5-5" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                          </svg>
+                        ) : (
+                          <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 20 20">
+                            <rect width="16" height="16" x="2" y="2" rx="2" strokeWidth="1.5" />
+                          </svg>
+                        )}
+                      </button>
+                      
+                      <span className={a.completed ? "line-through text-gray-500" : ""}>
+                        {a.title}
+                      </span>
+                    </div>
+                    <div className={`text-gray-700 text-xs sm:text-sm my-1 whitespace-pre-line break-words ${a.completed ? "line-through text-gray-500" : ""}`}>{a.description}</div>
+                  </div>
+                  {/* Three dot menu button */}
+                  <div className="relative zshub-menu flex-shrink-0">
+                    <button
+                      className="text-blue-700 hover:bg-blue-200 rounded-full p-1 focus:outline-none"
+                      onClick={e => {
+                        e.stopPropagation();
+                        setMenuOpenIdx(menuOpenIdx === i ? null : i);
+                      }}
+                      aria-label="Open menu"
+                    >
+                      <svg width="24" height="24" fill="none" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5" fill="currentColor"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/><circle cx="12" cy="19" r="1.5" fill="currentColor"/></svg>
+                    </button>
+                    {menuOpenIdx === i && (
+                      <div className="absolute right-0 mt-2 w-28 bg-white border border-gray-200 rounded-lg shadow-lg py-1 z-50 flex flex-col text-sm animate-fadeIn">
+                        <button
+                          className="text-left px-4 py-2 hover:bg-yellow-50 text-yellow-600"
+                          onClick={() => {
+                            setMenuOpenIdx(null);
+                            handleToggleStar(i);
+                          }}
+                        >
+                          {a.starred ? "Unstar" : "Star"}
+                        </button>
+                        <button
+                          className="text-left px-4 py-2 hover:bg-green-50 text-green-600"
+                          onClick={() => {
+                            setMenuOpenIdx(null);
+                            handleToggleCompleted(i);
+                          }}
+                        >
+                          {a.completed ? "Uncomplete" : "Complete"}
+                        </button>
+                        <button
+                          className="text-left px-4 py-2 hover:bg-blue-50 text-blue-700"
+                          onClick={() => {
+                            setMenuOpenIdx(null);
+                            handleEdit(i);
+                          }}
+                        >Edit</button>
+                        <button
+                          className="text-left px-4 py-2 hover:bg-red-50 text-red-600"
+                          onClick={() => {
+                            setMenuOpenIdx(null);
+                            handleDelete(i);
+                          }}
+                        >Delete</button>
+                      </div>
+                    )}
+                  </div>
                 </div>
-                <div className="flex gap-2 mt-2">
-                  <button onClick={() => handleEdit(i)} className="bg-blue-500 text-white rounded px-3 py-1 text-xs hover:bg-blue-600 transition">Edit</button>
-                  <button onClick={() => handleDelete(i)} className="bg-white text-blue-600 border border-blue-300 rounded px-3 py-1 text-xs hover:bg-blue-50 transition">Delete</button>
+                <div className="flex flex-wrap justify-between text-xs mt-1 items-center gap-2">
+                  <span className={`px-2 py-1 rounded font-semibold text-xs ${subjectColors[a.subject] || 'bg-gray-200 text-gray-800'} max-w-[60vw] truncate`}>{a.subject}</span>
+                  {a.deadline && (
+                    <span className="flex flex-col items-end">
+                      <span className="font-medium">{formatDate(a.deadline)}</span>
+                      <span className="text-[11px] font-normal italic">{daysLeft(a.deadline)}</span>
+                    </span>
+                  )}
                 </div>
               </li>
             ))}
@@ -279,16 +478,16 @@ export default function ZaraStudyHub() {
       </main>
       {/* Modal for Add/Edit Assignment */}
       {modalOpen && (
-        <div className="fixed inset-0 bg-black bg-opacity-30 flex items-center justify-center z-30">
-          <div ref={modalRef} className="bg-white rounded-2xl shadow-2xl p-6 sm:p-10 w-full max-w-md relative animate-fadeIn">
+        <div className="fixed inset-0 bg-black bg-opacity-30 flex items-center justify-center z-30 px-2 sm:px-0">
+          <div ref={modalRef} className="bg-white rounded-2xl shadow-2xl p-4 sm:p-6 md:p-10 w-full max-w-sm sm:max-w-md relative animate-fadeIn">
             <button
               onClick={closeModal}
-              className="absolute top-3 right-3 text-gray-400 hover:text-blue-600 text-2xl font-bold focus:outline-none"
+              className="absolute top-2 right-2 text-gray-400 hover:text-blue-600 text-2xl font-bold focus:outline-none"
               aria-label="Close"
             >
               &times;
             </button>
-            <form onSubmit={handleSubmit} className="flex flex-col gap-5">
+            <form onSubmit={handleSubmit} className="flex flex-col gap-4 sm:gap-5">
               <input
                 type="text"
                 value={form.title}
@@ -320,6 +519,21 @@ export default function ZaraStudyHub() {
                     <option key={subj} value={subj}>{subj}</option>
                   ))}
                 </select>
+              </div>
+              <div className="flex items-center mb-2">
+                <input
+                  id="starred-checkbox"
+                  type="checkbox"
+                  checked={form.starred}
+                  onChange={e => setForm(f => ({ ...f, starred: e.target.checked }))}
+                  className="w-4 h-4 text-yellow-500 bg-gray-100 border-gray-300 rounded focus:ring-yellow-500"
+                />
+                <label htmlFor="starred-checkbox" className="ml-2 text-sm font-medium text-gray-700 flex items-center">
+                  <svg className="w-4 h-4 text-yellow-500 mr-1" fill={form.starred ? "currentColor" : "none"} stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+                  </svg>
+                  Mark as priority
+                </label>
               </div>
               <div className="flex gap-3">
                 <button type="submit" className="bg-blue-600 text-white rounded-lg py-2 font-semibold flex-1 hover:bg-blue-700 transition text-base shadow">
